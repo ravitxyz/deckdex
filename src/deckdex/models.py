@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-import shutil
 import sqlite3
 from typing import List, Optional
 import subprocess
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 class TrackStage(Enum):
     WARMUP = "warmup"
@@ -26,13 +28,13 @@ class TrackMetadata:
     title: str
     artist: str
     genre: str
-    bpm: Optional[float]
-    key: Optional[str]
-    stage: Optional[TrackStage]
-    vibe: Optional[TrackVibe]
-    energy_level: Optional[int] # 1-10
-    rating: Optional[int] # 1-10
-    file_hash: Optional[str]
+    bpm: Optional[float] = None
+    key: Optional[str] = None
+    stage: Optional[TrackStage] = None
+    vibe: Optional[TrackVibe] = None
+    energy_level: Optional[int] = None  # 1-10
+    rating: Optional[int] = None  # 1-10
+    file_hash: Optional[str] = None
 
 class MusicLibrary:
     def __init__(self, db_path: Path, music_dir: Path, export_dir: Path):
@@ -42,41 +44,42 @@ class MusicLibrary:
         self.init_db()
 
     def init_db(self):
-
-        conn = sqlite3.connect(self.db_path)
-        conn.execure("""
-            CREATE TABLE IF NOT EXISTS tracks (
-                file_hash TEXT PRIMARY KEY,
-                file_path TEXT NOT NULL,
-                title TEXT NOT NULL,
-                artist TEXT NOT NULL,
-                genre TEXT,
-                bpm REAL,
-                key TEXT,
-                stage TEXT,
-                vibe TEXT,
-                energy_level INTEGER,
-                rating INTEGER,
-                last_modified DEFAULT CURRENT_TIMESTAMP
-            )
-
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS playlists (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execure("""
-            CREATE TABLE IF NOT EXISTS playlist_tracks (
-                playlist_id INTEGER,
-                track_hash TEXT,
-                position INTEGER,
-                FOREIGN KEY (playlist_id) REFERENCES playlists(id),
-                FOREIGN KEY (track_hash) REFERENCES tracks(file_hash),
-            )
-        """)
+        """Initialize SQLite database with schema."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tracks (
+                    file_hash TEXT PRIMARY KEY,
+                    file_path TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    artist TEXT NOT NULL,
+                    genre TEXT,
+                    bpm REAL,
+                    key TEXT,
+                    stage TEXT,
+                    vibe TEXT,
+                    energy_level INTEGER,
+                    rating INTEGER,
+                    last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS playlists (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS playlist_tracks (
+                    playlist_id INTEGER,
+                    track_hash TEXT,
+                    position INTEGER,
+                    FOREIGN KEY (playlist_id) REFERENCES playlists(id),
+                    FOREIGN KEY (track_hash) REFERENCES tracks(file_hash)
+                )
+            """)
 
     def calculate_file_hash(self, file_path: Path) -> str:
         """Calculate SHA256 hash of file for tracking changes."""
@@ -101,8 +104,12 @@ class MusicLibrary:
             str(aiff_path)
         ]
         
-        subprocess.run(cmd, check=True)
-        return aiff_path
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return aiff_path
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to convert {flac_path}: {e.stderr.decode()}")
+            raise
 
     def add_track(self, track_path: Path, metadata: TrackMetadata) -> None:
         """Add or update track in the library."""
