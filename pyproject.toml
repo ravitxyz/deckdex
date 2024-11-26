@@ -1,0 +1,13 @@
+[project]
+name = "deckdex"
+version = "0.1.0"
+description = "DJ Library Management System"
+dependencies = [
+    "click>=8.1.7",
+    "rich",
+]
+requires-python = ">=3.8"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
