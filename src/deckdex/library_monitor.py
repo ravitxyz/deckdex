@@ -169,7 +169,7 @@ class LibraryMonitor:
                 
                 for rel_path, rating in eligible_tracks.items():
                     if rating >= self.config.min_dj_rating / 2:  # Convert from 5-star to 10-point scale
-                        source_path = self.config.source_dir / rel_path
+                        source_path = Path(rel_path)
                         dj_path = self.config.dj_library_dir / rel_path
                         if source_path.suffix.lower() in self.config.convert_formats:
                             dj_path = dj_path.with_suffix('.aiff')
@@ -187,7 +187,6 @@ class LibraryMonitor:
             
         except Exception as e:
             self.logger.error(f"Error checking Plex updates: {e}")
-
     def start_monitoring(self):
         """Start monitoring both filesystem and Plex database for changes."""
         logger = logging.getLogger(__name__)
