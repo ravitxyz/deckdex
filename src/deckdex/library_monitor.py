@@ -102,14 +102,6 @@ class LibraryEventHandler(FileSystemEventHandler):
                 
         except Exception as e:
             self.logger.error(f"Error handling modified event for {event.src_path}: {str(e)}")
-            
-    def _is_in_source_dir(self, path: Path) -> bool:
-        """Check if the path is within the source directory."""
-        try:
-            path.relative_to(self.source_dir)
-            return True
-        except ValueError:
-            return False
 
     def on_moved(self, event):
         if event.is_directory:
@@ -127,7 +119,7 @@ class LibraryEventHandler(FileSystemEventHandler):
             path = Path(file_path)
             
             # Skip if file is already being processed
-            if file_path in self.processing_files:
+            if str(path) in self.processing_files:
                 return
                 
             # Check if this is an audio file we care about
@@ -136,8 +128,9 @@ class LibraryEventHandler(FileSystemEventHandler):
                 
             self.logger.info(f"Processing {event_type} event for {path}")
             
-            # Add to processing set
-            self.processing_files.add(file_path)
+            # Add to processing set with timestamp
+            current_time = time.time()
+            self.processing_files[str(path)] = current_time
             
             try:
                 # Process only the changed file instead of entire library
@@ -146,9 +139,8 @@ class LibraryEventHandler(FileSystemEventHandler):
                 else:
                     # For deleted files, we might want to clean up any symlinks/copies
                     self.reorganizer.handle_deleted_file(path)
-            finally:
-                # Always remove from processing set, even if an error occurred
-                self.processing_files.remove(file_path)
+            except Exception as e:
+                self.logger.error(f"Error processing {event_type} event for {path}: {e}")
             
         except Exception as e:
             self.logger.error(f"Error handling file event {event_type} for {file_path}: {str(e)}")
@@ -177,8 +169,9 @@ class LibraryMonitor:
                 
                 for rel_path, rating in eligible_tracks.items():
                     if rating >= self.config.min_dj_rating / 2:  # Convert from 5-star to 10-point scale
+                        source_path = self.config.source_dir / rel_path
                         dj_path = self.config.dj_library_dir / rel_path
-                        if self._needs_conversion(Path(rel_path)):
+                        if source_path.suffix.lower() in self.config.convert_formats:
                             dj_path = dj_path.with_suffix('.aiff')
                             
                         if not dj_path.exists():
@@ -194,28 +187,30 @@ class LibraryMonitor:
             
         except Exception as e:
             self.logger.error(f"Error checking Plex updates: {e}")
+
     def start_monitoring(self):
-            """Start monitoring both filesystem and Plex database for changes."""
-            logger = logging.getLogger(__name__)
-            event_handler = LibraryEventHandler(self.config)
-            observer = Observer()
-            observer.schedule(event_handler, self.config.source_dir, recursive=True)
-            observer.start()
-            
-            def plex_check_loop():
-                while True:
-                    try:
-                        self.check_plex_updates()
-                        time.sleep(30)  # Check every 30 seconds instead of 5 minutes
-                    except Exception as e:
-                        logger.error(f"Error in Plex check loop: {e}")
-                        time.sleep(5)  # Short sleep on error before retrying
-                    
-            import threading
-            plex_thread = threading.Thread(target=plex_check_loop, daemon=True, name="PlexMonitor")
-            plex_thread.start()
-            
-            return observer
+        """Start monitoring both filesystem and Plex database for changes."""
+        logger = logging.getLogger(__name__)
+        event_handler = LibraryEventHandler(self.config)
+        observer = Observer()
+        observer.schedule(event_handler, self.config.source_dir, recursive=True)
+        observer.start()
+        
+        def plex_check_loop():
+            while True:
+                try:
+                    self.check_plex_updates()
+                    time.sleep(30)  # Check every 30 seconds instead of 5 minutes
+                except Exception as e:
+                    logger.error(f"Error in Plex check loop: {e}")
+                    time.sleep(5)  # Short sleep on error before retrying
+                
+        import threading
+        plex_thread = threading.Thread(target=plex_check_loop, daemon=True, name="PlexMonitor")
+        plex_thread.start()
+        
+        return observer
+
 def main():
     # Increase system file descriptor limit
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
