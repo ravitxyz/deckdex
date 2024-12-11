@@ -416,6 +416,38 @@ class LibraryReorganizer:
         except Exception as e:
             self.logger.error(f"Failed to clean up deleted file {file_path}: {e}")
 
+
+    def process_rating_changes(self, rating_changes: Dict[str, float]):
+        """Process files that have had their ratings changed in Plex."""
+        for relative_path, new_rating in rating_changes.items():
+            try:
+                source_path = self.config.source_dir / relative_path
+                if not source_path.exists():
+                    self.logger.warning(f"Source file not found: {source_path}")
+                    continue
+
+                # Get DJ library path
+                dj_path = self.config.dj_library_dir / relative_path
+                if self._needs_conversion(source_path):
+                    dj_path = dj_path.with_suffix('.aiff')
+
+                if new_rating >= self.config.min_dj_rating / 2:  # Convert from 5-star to 10-point scale
+                    # Rating meets threshold - ensure file is in DJ library
+                    self.process_single_file(source_path)
+                    self.logger.info(f"Added/Updated in DJ library: {relative_path} (Rating: {new_rating} stars)")
+                else:
+                    # Rating below threshold - remove from DJ library if present
+                    if dj_path.exists():
+                        dj_path.unlink()
+                        self.logger.info(f"Removed from DJ library: {relative_path} (Rating: {new_rating} stars)")
+                        
+                        # Clean up empty artist directory if this was the last track
+                        artist_dir = dj_path.parent
+                        if artist_dir.exists() and not any(artist_dir.iterdir()):
+                            artist_dir.rmdir()
+
+            except Exception as e:
+                self.logger.error(f"Error processing rating change for {relative_path}: {e}") 
 def main():
     # Configure logging
     logging.basicConfig(
