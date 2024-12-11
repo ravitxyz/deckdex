@@ -5,6 +5,10 @@ description = "DJ Library Management System"
 dependencies = [
     "click>=8.1.7",
     "rich",
+    "mutagen",
+    "pyyaml",
+    "watchdog",
+    "mutagen"
 ]
 requires-python = ">=3.8"
 

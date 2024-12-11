@@ -1,140 +1,95 @@
-# src/deckdex/file_processor.py
-
-import logging
 from pathlib import Path
-from typing import Optional, Iterator
-import hashlib
+import logging
+from typing import Optional, Tuple
 from mutagen import File as MutagenFile
-from mutagen.easyid3 import EasyID3
-
-from .models import TrackMetadata, MusicLibrary
-
-logger = logging.getLogger(__name__)
+from .models import TrackMetadata
+import hashlib
 
 class FileProcessor:
-    """Process music files and extract metadata."""
-    
-    SUPPORTED_EXTENSIONS = {'.mp3', '.flac', '.aiff', '.wav', '.m4a'}
-    
-    def __init__(self, library: MusicLibrary):
-        self.library = library
-    
-    def scan_directory(self, directory: Path) -> Iterator[Path]:
-        """Scan directory for music files recursively."""
-        if not directory.exists():
-            raise FileNotFoundError(f"Directory not found: {directory}")
-            
-        for file_path in directory.rglob('*'):
-            if file_path.is_file() and file_path.suffix.lower() in self.SUPPORTED_EXTENSIONS:
-                logger.debug(f"Found music file: {file_path}")
-                yield file_path
-    
-    def process_file(self, file_path: Path) -> Optional[TrackMetadata]:
-        """Process a single music file and extract metadata."""
+    def __init__(self, source_dir: Path, dest_dir: Path):
+        self.source_dir = Path(source_dir)
+        self.dest_dir = Path(dest_dir)
+        self.logger = logging.getLogger(__name__)
+
+    def process_directory(self):
+        """Process all audio files in directory and yield (path, metadata) tuples."""
+        for file_path in self.source_dir.rglob('*'):
+            if self._is_audio_file(file_path):
+                try:
+                    metadata = self._extract_metadata(file_path)
+                    if metadata:
+                        yield file_path, metadata
+                except Exception as e:
+                    self.logger.error(f"Failed to process {file_path}: {str(e)}")
+
+    def _extract_metadata(self, file_path: Path) -> Optional[TrackMetadata]:
+        """Extract metadata from audio file."""
         try:
-            # Calculate file hash first
-            file_hash = self.library.calculate_file_hash(file_path)
-            
-            # Extract metadata using mutagen
             audio = MutagenFile(file_path)
             if audio is None:
-                logger.warning(f"Could not read metadata from {file_path}")
-                return self._create_basic_metadata(file_path, file_hash)
-            
-            # Try to get ID3 tags for MP3s
-            if file_path.suffix.lower() == '.mp3':
-                try:
-                    audio = EasyID3(file_path)
-                except:
-                    logger.warning(f"Could not read ID3 tags from {file_path}")
-                    return self._create_basic_metadata(file_path, file_hash)
-            
-            # Extract metadata
-            metadata = self._extract_metadata(file_path, audio, file_hash)
-            logger.debug(f"Processed metadata for {file_path}: {metadata}")
-            return metadata
-            
-        except Exception as e:
-            logger.error(f"Error processing {file_path}: {e}")
-            return None
-    
-    def _extract_metadata(self, file_path: Path, audio, file_hash: str) -> TrackMetadata:
-        """Extract metadata from audio file using mutagen."""
-        # Default values
-        title = file_path.stem
-        artist = "Unknown"
-        genre = "Unknown"
-        bpm = None
-        key = None
-        
-        # Try to extract basic metadata
-        if hasattr(audio, 'tags') and audio.tags:
-            # Handle MP3 (ID3) tags
-            if isinstance(audio, EasyID3):
-                title = audio.get('title', [file_path.stem])[0]
-                artist = audio.get('artist', ['Unknown'])[0]
-                genre = audio.get('genre', ['Unknown'])[0]
-                
-                # Try to get BPM
-                if 'bpm' in audio:
-                    try:
-                        bpm = float(audio['bpm'][0])
-                    except (ValueError, IndexError):
-                        pass
-                
-                # Try to get key
-                key = audio.get('key', [None])[0]
-            
-            # Handle other formats
-            else:
-                tags = audio.tags
-                title = str(tags.get('title', [file_path.stem])[0])
-                artist = str(tags.get('artist', ['Unknown'])[0])
-                genre = str(tags.get('genre', ['Unknown'])[0])
-                
-                # Try to get BPM
-                if 'bpm' in tags:
-                    try:
-                        bpm = float(str(tags['bpm'][0]))
-                    except (ValueError, IndexError):
-                        pass
-                
-                # Try to get key
-                if 'key' in tags:
-                    key = str(tags['key'][0])
-        
-        return TrackMetadata(
-            file_path=file_path,
-            title=title,
-            artist=artist,
-            genre=genre,
-            bpm=bpm,
-            key=key,
-            stage=None,  # These will be set manually/through UI
-            vibe=None,   # These will be set manually/through UI
-            energy_level=None,
-            rating=None,
-            file_hash=file_hash
-        )
-    
-    def _create_basic_metadata(self, file_path: Path, file_hash: str) -> TrackMetadata:
-        """Create basic metadata from filename when tags can't be read."""
-        return TrackMetadata(
-            file_path=file_path,
-            title=file_path.stem,
-            artist="Unknown",
-            genre="Unknown",
-            file_hash=file_hash
-        )
-    
-    def handle_flac_conversion(self, file_path: Path) -> Optional[Path]:
-        """Convert FLAC to AIFF if needed."""
-        if file_path.suffix.lower() == '.flac':
-            try:
-                aiff_path = self.library.convert_flac_to_aiff(file_path)
-                logger.info(f"Converted {file_path} to {aiff_path}")
-                return aiff_path
-            except Exception as e:
-                logger.error(f"Failed to convert {file_path} to AIFF: {e}")
                 return None
-        return None
+
+            # Basic metadata extraction
+            return TrackMetadata(
+                file_path=file_path,
+                title=file_path.stem,  # Default to filename
+                artist=file_path.parent.name,  # Default to parent directory name
+                genre="",
+                file_hash=self._calculate_file_hash(file_path)
+            )
+        except Exception as e:
+            self.logger.error(f"Metadata extraction failed for {file_path}: {str(e)}")
+            return None
+
+    def _calculate_file_hash(self, file_path: Path) -> str:
+        """Calculate SHA-256 hash of file content."""
+        hasher = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            # Read in chunks to handle large files efficiently
+            for chunk in iter(lambda: f.read(65536), b''):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _is_audio_file(self, file_path: Path) -> bool:
+        """Check if file is a supported audio format."""
+        if file_path.name.startswith('.'):
+            return False
+        return file_path.suffix.lower() in ['.mp3', '.flac', '.aiff', '.wav', '.m4a']
+
+    def process_files(self):
+        """Process all audio files."""
+        for file_path in self.source_dir.rglob('*'):
+            if self._is_audio_file(file_path):
+                self._process_file(file_path)
+
+    def _process_file(self, file_path: Path):
+        """Process a single audio file."""
+        if self._needs_conversion(file_path):
+            relative_path = file_path.relative_to(self.source_dir)
+            dest_file = self.dest_dir / relative_path.parent / f"{file_path.stem}.aiff"
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            self._convert_to_aiff(file_path, dest_file)
+        else:
+            relative_path = file_path.relative_to(self.source_dir)
+            dest_file = self.dest_dir / relative_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file_path, dest_file)
+
+    def _needs_conversion(self, file_path: Path) -> bool:
+        """Check if file needs conversion to AIFF."""
+        return file_path.suffix.lower() in ['.flac', '.wav']
+
+    def _convert_to_aiff(self, source_file: Path, dest_file: Path):
+        """Convert audio file to AIFF format."""
+        cmd = [
+            'ffmpeg', '-i', str(source_file),
+            '-c:a', 'pcm_s16be',
+            '-f', 'aiff',
+            str(dest_file),
+            '-y'
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Conversion failed for {source_file}: {e}")
+            raise

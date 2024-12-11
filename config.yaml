@@ -1,0 +1,20 @@
+# /home/ravit/deckdex/config.yaml
+
+paths:
+  source_dir: "/home/ravit/drives/tracks"
+  listening_lib: "/home/ravit/music/listening"
+  dj_lib: "/home/ravit/music/dj"
+  db_path: "/home/ravit/music/deckdex.db"
+  plex_db: "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+
+library:
+  rating_threshold: 6.0
+  formats:
+    - ".mp3"
+    - ".flac"
+    - ".aiff"
+    - ".wav"
+    - ".m4a"
+  convert_formats:
+    - ".flac"
+    - ".wav"

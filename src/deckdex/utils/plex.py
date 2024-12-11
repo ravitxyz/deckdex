@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List, Tuple
 import shutil
 from datetime import datetime
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,11 @@ class PlexLibraryReader:
     def __init__(self, plex_db_path: Path, music_dir: Path):
         self.plex_db_path = plex_db_path
         self.music_dir = music_dir
+        
+        # Add working directory initialization
+        self.working_dir = Path.home() / '.cache' / 'deckdex'
+        self.working_dir.mkdir(parents=True, exist_ok=True)
+        
         self._verify_db()
 
     def _verify_db(self) -> None:
@@ -20,10 +26,22 @@ class PlexLibraryReader:
         if not self.plex_db_path.exists():
             raise FileNotFoundError(f"Plex database not found at {self.plex_db_path}")
             
-        # Create a working copy to avoid corrupting the live database
-        self.working_db = self.plex_db_path.parent / f"plex_working_copy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        shutil.copy2(self.plex_db_path, self.working_db)
-        logger.info(f"Created working copy of Plex database at {self.working_db}")
+        # Create a working copy in our cache directory
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.working_db = self.working_dir / f"plex_working_copy_{timestamp}.db"
+        
+        try:
+            # Ensure we have read access to the original database
+            if not os.access(self.plex_db_path, os.R_OK):
+                raise PermissionError(f"No read permission for Plex database at {self.plex_db_path}")
+            
+            # Copy to our cache directory
+            shutil.copy2(self.plex_db_path, self.working_db)
+            logger.info(f"Created working copy of Plex database at {self.working_db}")
+        except PermissionError:
+            logger.error(f"No permission to read Plex database at {self.plex_db_path}")
+            logger.error(f"Try: sudo chmod 644 '{self.plex_db_path}'")
+            raise
 
     def get_ratings(self) -> Dict[str, int]:
         """
@@ -127,3 +145,36 @@ class PlexLibraryReader:
             logger.info("Removed working copy of Plex database")
         except Exception as e:
             logger.warning(f"Failed to remove working database: {e}")
+
+    def get_recent_rating_changes(self, since_timestamp: float) -> Dict[str, float]:
+        """Get tracks with rating changes since the given timestamp."""
+        changes = {}
+        
+        try:
+            with sqlite3.connect(self.working_db) as conn:
+                cursor = conn.execute("""
+                    SELECT 
+                        media_parts.file,
+                        metadata_item_settings.rating,
+                        metadata_item_settings.updated_at
+                    FROM metadata_item_settings
+                    JOIN metadata_items ON metadata_items.guid = metadata_item_settings.guid
+                    JOIN media_items ON media_items.metadata_item_id = metadata_items.id
+                    JOIN media_parts ON media_items.id = media_parts.media_item_id
+                    WHERE metadata_item_settings.updated_at > ?
+                    AND metadata_item_settings.rating IS NOT NULL
+                """, (since_timestamp,))
+                
+                for file_path, rating, _ in cursor:
+                    try:
+                        rel_path = Path(file_path).relative_to(self.music_dir)
+                        normalized_rating = max(1, min(5, round(float(rating) / 2)))
+                        changes[str(rel_path)] = normalized_rating
+                    except ValueError:
+                        logger.warning(f"Skipping file outside music dir: {file_path}")
+                    
+            return changes
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error reading Plex database: {e}")
+            raise
