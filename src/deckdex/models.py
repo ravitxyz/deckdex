@@ -80,6 +80,24 @@ class MusicLibrary:
                     FOREIGN KEY (track_hash) REFERENCES tracks(file_hash)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS track_identifiers (
+                    track_id TEXT PRIMARY KEY,
+                    file_hash TEXT,
+                    audio_fingerprint TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (file_hash) REFERENCES tracks(file_hash)
+
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS track_locations (
+                    track_id TEXT,
+                    file_path TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (track_id) REFERENCES track_identifiers(track_id)
+                )
+            """)
 
     def calculate_file_hash(self, file_path: Path) -> str:
         """Calculate SHA256 hash of file for tracking changes."""
