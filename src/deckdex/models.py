@@ -7,6 +7,8 @@ import subprocess
 import hashlib
 import logging
 
+from deckdex.identifier.models import TrackIdentifier, TrackFingerprint
+
 logger = logging.getLogger(__name__)
 
 class TrackStage(Enum):
@@ -21,6 +23,11 @@ class TrackVibe(Enum):
     GOINGFORIT = "goingforit"
     SPOOKY = "spooky"
     HARD = "hard"
+
+class LocationStatus(Enum):
+    ACTIVE = "active"
+    MOVED = "moved"
+    DELETED = "deleted"
 
 @dataclass
 class TrackMetadata:
@@ -80,24 +87,50 @@ class MusicLibrary:
                     FOREIGN KEY (track_hash) REFERENCES tracks(file_hash)
                 )
             """)
+            # Enhanced track identifiers table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS track_identifiers (
                     track_id TEXT PRIMARY KEY,
-                    file_hash TEXT,
+                    file_hash TEXT NOT NULL,
                     audio_fingerprint TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (file_hash) REFERENCES tracks(file_hash)
-
+                    confidence_score REAL DEFAULT 1.0,
+                    metadata_version INTEGER DEFAULT 1,
+                    created_at TIMESTAMP NOT NULL,
+                    last_seen TIMESTAMP NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    UNIQUE(file_hash)
                 )
             """)
+
+            # Enhanced track locations table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS track_locations (
                     track_id TEXT,
                     file_path TEXT NOT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'active',
+                    source_path TEXT,
+                    timestamp TIMESTAMP NOT NULL,
+                    PRIMARY KEY (track_id, file_path),
                     FOREIGN KEY (track_id) REFERENCES track_identifiers(track_id)
                 )
             """)
+
+            # New track fingerprints table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS track_fingerprints (
+                    track_id TEXT,
+                    fingerprint TEXT NOT NULL,
+                    algorithm TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (track_id, algorithm),
+                    FOREIGN KEY (track_id) REFERENCES track_identifiers(track_id)
+                )
+            """)
+
+            # Add performance indexes
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_track_locations_path ON track_locations(file_path)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_track_fingerprints_fp ON track_fingerprints(fingerprint)")
 
     def calculate_file_hash(self, file_path: Path) -> str:
         """Calculate SHA256 hash of file for tracking changes."""
@@ -106,6 +139,95 @@ class MusicLibrary:
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
         return sha256_hash.hexdigest()
+
+    def create_track_identifier(self, file_path: Path) -> TrackIdentifier:
+        """Create a new track identifier for a file."""
+        file_hash = self.calculate_file_hash(file_path)
+        track_id = str(uuid.uuid4())
+        
+        identifier = TrackIdentifier(
+            track_id=track_id,
+            file_hash=file_hash,
+        )
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO track_identifiers 
+                (track_id, file_hash, created_at, last_seen)
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, (identifier.track_id, identifier.file_hash))
+        
+        return identifier
+
+    def update_track_location(self, track_id: str, new_path: Path, old_path: Optional[Path] = None):
+        """Update the location of a track."""
+        with sqlite3.connect(self.db_path) as conn:
+            # Mark old location as moved if it exists
+            if old_path:
+                conn.execute("""
+                    UPDATE track_locations
+                    SET status = ?, timestamp = CURRENT_TIMESTAMP
+                    WHERE track_id = ? AND file_path = ?
+                """, (LocationStatus.MOVED.value, track_id, str(old_path)))
+            
+            # Add new location
+            conn.execute("""
+                INSERT INTO track_locations 
+                (track_id, file_path, status, source_path, timestamp)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (track_id, str(new_path), LocationStatus.ACTIVE.value, 
+                  str(old_path) if old_path else None))
+
+    def add_fingerprint(self, track_id: str, fingerprint: str, algorithm: str, confidence: float):
+        """Add or update a fingerprint for a track."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO track_fingerprints
+                (track_id, fingerprint, algorithm, confidence, created_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (track_id, fingerprint, algorithm, confidence))
+            
+            # Update last_seen in track_identifiers
+            conn.execute("""
+                UPDATE track_identifiers
+                SET last_seen = CURRENT_TIMESTAMP
+                WHERE track_id = ?
+            """, (track_id,))
+
+    def find_track_by_fingerprint(self, fingerprint: str, algorithm: str) -> Optional[str]:
+        """Find a track ID by its fingerprint."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT track_id, confidence
+                FROM track_fingerprints
+                WHERE fingerprint = ? AND algorithm = ?
+                ORDER BY confidence DESC
+                LIMIT 1
+            """, (fingerprint, algorithm))
+            
+            result = cursor.fetchone()
+            return result[0] if result else None
+
+    def get_track_locations(self, track_id: str) -> List[TrackLocation]:
+        """Get all known locations for a track."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT file_path, status, source_path, timestamp
+                FROM track_locations
+                WHERE track_id = ?
+                ORDER BY timestamp DESC
+            """, (track_id,))
+            
+            return [
+                TrackLocation(
+                    track_id=track_id,
+                    file_path=Path(row[0]),
+                    status=LocationStatus(row[1]),
+                    source_path=Path(row[2]) if row[2] else None,
+                    timestamp=datetime.fromisoformat(row[3])
+                )
+                for row in cursor.fetchall()
+            ]
 
     def convert_flac_to_aiff(self, flac_path: Path) -> Path:
         """Convert FLAC to AIFF using ffmpeg."""
@@ -121,10 +243,10 @@ class MusicLibrary:
             '-f', 'aiff',
             str(aiff_path)
         ]
-        
         try:
             subprocess.run(cmd, check=True, capture_output=True)
             return aiff_path
+
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to convert {flac_path}: {e.stderr.decode()}")
             raise
