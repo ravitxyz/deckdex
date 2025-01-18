@@ -1,0 +1,8 @@
+Plex File Diagnostic Report
+========================
+
+HIGH Severity Issues:
+--------------------
+
+File: /tmp/e102-967c-5969-1a95.txt
+- File not found

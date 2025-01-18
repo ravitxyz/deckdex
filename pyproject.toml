@@ -1,21 +1,71 @@
-[project]
-name = "deckdex"
-version = "0.1.0"
-description = "DJ Library Management System"
-dependencies = [
-    "click>=8.1.7",
-    "rich",
-    "mutagen",
-    "pyyaml",
-    "watchdog",
-    "mutagen"
-]
-requires-python = ">=3.8"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.poetry.dependencies]
-pyacoustid = "^1.3.0"
-chromaprint = "^1.5.0"  # System package, not Python package
+[project]
+name = "deckdex"
+version = "0.1.0"
+description = "DJ Music Management System"
+requires-python = ">=3.9"
+dependencies = [
+    "rich",
+    "pyyaml",
+    "watchdog",
+    "aiofiles",
+    "aiohttp",
+    "pyacoustid"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+    "pytest-mock",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks tests as integration tests",
+]
+
+[tool.hatch.build]
+packages = ["src/deckdex"]
+
+[tool.hatch.envs.test]
+dependencies = [
+    "coverage[toml]>=6.5",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+omit = [
+    "tests/*",
+    "**/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "no cov",
+    "if __name__ == .__main__.:",
+    "pragma: no cover",
+]
+
+[tool.coverage.html]
+directory = "coverage_html"
+
+# Development dependencies
+[tool.hatch.envs.default]
+dependencies = [
+    "black",
+    "ruff",
+    "mypy",
+]

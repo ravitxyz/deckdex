@@ -7,7 +7,11 @@ import subprocess
 import hashlib
 import logging
 
-from deckdex.identifier.models import TrackIdentifier, TrackFingerprint
+from deckdex.identifier.models import (
+    TrackIdentifier, 
+    AudioFingerprint,
+    TrackLocation
+)
 
 logger = logging.getLogger(__name__)
 

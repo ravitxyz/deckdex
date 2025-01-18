@@ -8,6 +8,7 @@ from watchdog.events import FileSystemEventHandler
 import os
 import yaml
 import resource
+import threading
 
 from deckdex.reorganizer import LibraryReorganizer, Config
 from deckdex.models import MusicLibrary
@@ -20,6 +21,8 @@ class LibraryEventHandler(FileSystemEventHandler):
         self.logger = logging.getLogger(__name__)
         self.reorganizer = LibraryReorganizer(config)
         self.processing_files = {}  # Change to dict to store timestamps
+        self.debounce_timers = {}  # Add debounce timers
+        self.min_rating_threshold = config.min_dj_rating / 2  # Convert to 5-star scale
         self.source_dir = Path(config.source_dir)
         # Add destination directories to ignore
         self.ignored_dirs = {
@@ -30,30 +33,29 @@ class LibraryEventHandler(FileSystemEventHandler):
     def _should_process_path(self, path: Path) -> bool:
         """Determine if a path should be processed."""
         try:
-            # Clean up old processing timestamps
+            # Clean up old processing timestamps (extend to 15 minutes)
             current_time = time.time()
             self.processing_files = {
                 k: v for k, v in self.processing_files.items() 
-                if current_time - v < 300  # Remove entries older than 5 minutes
+                if current_time - v < 900  # 15 minutes instead of 5
             }
             
-            # Check if path is in any ignored directory
-            for ignored_dir in self.ignored_dirs:
-                if str(path).startswith(str(ignored_dir)):
-                    return False
-                    
-            # Only process files in source directory
+            # Standard path checks
+            if any(str(path).startswith(str(d)) for d in self.ignored_dirs):
+                return False
+                
             if not str(path).startswith(str(self.source_dir)):
                 return False
                 
-            # Skip if file is already being processed
-            if str(path) in self.processing_files:
-                return False
-                
-            # Check if this is an audio file we care about
             if path.suffix.lower() not in self.config.supported_formats:
                 return False
                 
+            # More strict cooldown check
+            if str(path) in self.processing_files:
+                last_process_time = self.processing_files[str(path)]
+                if current_time - last_process_time < 900:  # 15 minute cooldown
+                    return False
+                    
             return True
             
         except Exception:
@@ -74,36 +76,39 @@ class LibraryEventHandler(FileSystemEventHandler):
             if not self._should_process_path(path):
                 return
                 
-            # Add debouncing - wait a short time before processing
-            time.sleep(0.1)  # 100ms delay
-            
-            # Check again after delay in case more modifications occurred
-            if not self._should_process_path(path):
-                return
+            # Cancel existing timer if any
+            if str(path) in self.debounce_timers:
+                self.debounce_timers[str(path)].cancel()
                 
-            self.logger.info(f"Processing modified event for {path}")
-            
-            # Add to processing set with timestamp
-            current_time = time.time()
-            file_key = str(path)
-            
-            # Skip if file was processed in the last 5 seconds
-            if file_key in self.processing_files:
-                last_process_time = self.processing_files[file_key]
-                if current_time - last_process_time < 5:  # 5 second cooldown
-                    return
-            
-            self.processing_files[file_key] = current_time
-            
-            try:
-                self.reorganizer.process_single_file(path)
-            finally:
-                # Keep timestamp in processing_files for cooldown period
-                # Will be cleaned up periodically or on next process attempt
-                pass
+            # Create new timer
+            timer = threading.Timer(2.0, self._process_modified_file, args=[path])
+            self.debounce_timers[str(path)] = timer
+            timer.start()
                 
         except Exception as e:
-            self.logger.error(f"Error handling modified event for {event.src_path}: {str(e)}")
+            self.logger.error(f"Error handling modified event: {e}")
+
+    def _process_modified_file(self, path: Path):
+        """Process file after debounce period."""
+        try:
+            # Remove from debounce timers
+            self.debounce_timers.pop(str(path), None)
+            
+            # Check rating before processing
+            plex_reader = PlexLibraryReader(self.config.plex_db_path, self.config.source_dir)
+            rating = plex_reader.get_track_rating(path)
+            
+            # Only process if rating meets threshold
+            if rating and rating >= self.min_rating_threshold:
+                self.logger.info(f"Processing file with rating {rating}: {path}")
+                current_time = time.time()
+                self.processing_files[str(path)] = current_time
+                self.reorganizer.process_single_file(path)
+            else:
+                self.logger.debug(f"Skipping file with insufficient rating ({rating}): {path}")
+                
+        except Exception as e:
+            self.logger.error(f"Error processing modified file {path}: {e}")
 
     def on_moved(self, event):
         if event.is_directory:
@@ -202,10 +207,10 @@ class LibraryMonitor:
             while True:
                 try:
                     self.check_plex_updates()
-                    time.sleep(30)  # Check every 30 seconds instead of 5 minutes
+                    time.sleep(300)  # Check every 5 minutes instead of 30 seconds
                 except Exception as e:
                     logger.error(f"Error in Plex check loop: {e}")
-                    time.sleep(5)  # Short sleep on error before retrying
+                    time.sleep(5)
                 
         import threading
         plex_thread = threading.Thread(target=plex_check_loop, daemon=True, name="PlexMonitor")

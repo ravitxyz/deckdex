@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import shutil
 from datetime import datetime
 import os
@@ -85,10 +85,37 @@ class PlexLibraryReader:
         except sqlite3.Error as e:
             logger.error(f"Error reading Plex database: {e}")
             raise
+    def get_track_rating(self, file_path: Path) -> Optional[float]:
+        """Get rating for a specific track from Plex database."""
+        try:
+            with sqlite3.connect(f"file:{self.plex_db_path}?mode=ro", uri=True) as conn:
+                cursor = conn.execute("""
+                    SELECT 
+                        COALESCE(mis.rating, mi.rating) as rating
+                    FROM metadata_items mi
+                    JOIN media_items mmi ON mi.id = mmi.metadata_item_id
+                    JOIN media_parts mp ON mmi.id = mp.media_item_id
+                    LEFT JOIN metadata_item_settings mis ON mi.guid = mis.guid
+                    WHERE mp.file = ?
+                    AND mi.metadata_type = 10  -- Type 10 is for music tracks
+                    LIMIT 1
+                """, (str(file_path),))
+                
+                row = cursor.fetchone()
+                if row and row[0] is not None:
+                    rating = float(row[0])
+                    # Return the raw Plex 0-10 rating as that's what the LibraryMonitor expects
+                    return rating
+                return None
+                
+        except (sqlite3.Error, ValueError, TypeError) as e:
+            logger.error(f"Error getting track rating for {file_path}: {e}")
+            return None
 
     def get_ratings(self) -> Dict[str, float]:
         """Get all track ratings from Plex database."""
         return self.get_recent_rating_changes(0)  # Get all ratings by using 0 timestamp
+
     def get_eligible_tracks(self) -> Dict[str, float]:
         """Get all tracks that meet the DJ library rating threshold."""
         try:
