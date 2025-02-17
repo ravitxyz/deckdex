@@ -1,12 +1,4 @@
-from .service import MetadataService
-from .providers import AcoustIDProvider, MusicBrainzProvider, DiscogsProvider, PlexProvider
-from .cache import MetadataCache
+from .models import TrackMetadata
+from .service import MetadataService, MetadataProvider, MetadataCache
 
-__all__ = [
-    'MetadataService',
-    'AcoustIDProvider',
-    'MusicBrainzProvider',
-    'DiscogsProvider',
-    'PlexProvider',
-    'MetadataCache',
-]
+__all__ = ['MetadataService', 'MetadataProvider', 'MetadataCache', 'TrackMetadata']

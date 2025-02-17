@@ -13,6 +13,7 @@ dependencies = [
     "watchdog",
     "aiofiles",
     "aiohttp",
+    "aiosqlite",
     "pyacoustid"
 ]
 
