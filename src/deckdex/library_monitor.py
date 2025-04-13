@@ -175,18 +175,32 @@ class LibraryMonitor:
                 eligible_tracks = self.plex_reader.get_eligible_tracks()
                 missing_tracks = {}
                 
+                # We'll skip complex path checks and just directly process any eligible tracks
+                # This allows the reorganizer to handle path mapping based on actual metadata
+                
+                self.logger.info(f"DJ library directory: {self.config.dj_library_dir}")
+                self.logger.info(f"Source directory: {self.config.source_dir}")
+                
+                # Count how many tracks we're processing
+                qualifying_tracks_count = 0
+                
+                # Check each eligible track
                 for rel_path, rating in eligible_tracks.items():
                     if rating >= self.config.min_dj_rating / 2:  # Convert from 5-star to 10-point scale
-                        source_path = Path(rel_path)
-                        dj_path = self.config.dj_library_dir / rel_path
-                        if source_path.suffix.lower() in self.config.convert_formats:
-                            dj_path = dj_path.with_suffix('.aiff')
+                        try:
+                            # Get full source path
+                            source_path = self.config.source_dir / Path(rel_path)
                             
-                        if not dj_path.exists():
-                            missing_tracks[rel_path] = rating
+                            # Just check if source file exists
+                            if source_path.exists() and source_path.is_file():
+                                qualifying_tracks_count += 1
+                                # Add to a dictionary to process in batch at the end
+                                missing_tracks[str(rel_path)] = rating
+                        except Exception as e:
+                            self.logger.error(f"Error checking track {rel_path}: {e}")
                             
                 if missing_tracks:
-                    self.logger.info(f"Found {len(missing_tracks)} rated tracks missing from DJ library")
+                    self.logger.info(f"Processing {qualifying_tracks_count} qualified tracks for DJ library")
                     self.reorganizer.process_rating_changes(missing_tracks)
                     
                 self.last_full_scan = time.time()

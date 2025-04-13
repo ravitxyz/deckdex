@@ -14,7 +14,8 @@ dependencies = [
     "aiofiles",
     "aiohttp",
     "aiosqlite",
-    "pyacoustid"
+    "pyacoustid",
+    "mutagen"
 ]
 
 [project.optional-dependencies]

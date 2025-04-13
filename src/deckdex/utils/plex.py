@@ -24,10 +24,18 @@ class PlexLibraryReader:
         if not self.plex_db_path.is_file():
             raise ValueError(f"Plex database path is not a file: {self.plex_db_path}")
             
-        # Test database connection
+        # Test database connection with improved WAL mode handling
         try:
             with sqlite3.connect(f"file:{self.plex_db_path}?mode=ro", uri=True) as conn:
+                # Set WAL journal mode and other pragmas for better concurrent access
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA locking_mode=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=10000;")  # Wait up to 10 seconds if DB is locked
+                
+                # Test query
                 conn.execute("SELECT 1 FROM metadata_items LIMIT 1")
+                logger.info(f"Successfully connected to Plex database at {self.plex_db_path}")
         except sqlite3.Error as e:
             logger.error(f"Cannot access Plex database: {e}")
             raise
@@ -37,8 +45,13 @@ class PlexLibraryReader:
         changes = {}
         
         try:
-            # Connect in read-only mode
+            # Connect in read-only mode with improved WAL mode handling
             with sqlite3.connect(f"file:{self.plex_db_path}?mode=ro", uri=True) as conn:
+                # Configure connection for better concurrent access
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA locking_mode=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=10000;")
                 conn.row_factory = sqlite3.Row
                 
                 # Query both metadata_items and metadata_item_settings for rating changes
@@ -89,6 +102,12 @@ class PlexLibraryReader:
         """Get rating for a specific track from Plex database."""
         try:
             with sqlite3.connect(f"file:{self.plex_db_path}?mode=ro", uri=True) as conn:
+                # Configure connection for better concurrent access
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA locking_mode=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=10000;")
+                
                 cursor = conn.execute("""
                     SELECT 
                         COALESCE(mis.rating, mi.rating) as rating
@@ -120,6 +139,12 @@ class PlexLibraryReader:
         """Get all tracks that meet the DJ library rating threshold."""
         try:
             with sqlite3.connect(f"file:{self.plex_db_path}?mode=ro", uri=True) as conn:
+                # Configure connection for better concurrent access
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA locking_mode=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=10000;")
+                
                 cursor = conn.execute("""
                     SELECT 
                         mp.file as file_path,
@@ -135,16 +160,29 @@ class PlexLibraryReader:
                 eligible_tracks = {}
                 for row in cursor:
                     try:
-                        file_path = Path(row[0])
-                        if not file_path.exists():
+                        # Get absolute path to the file from Plex DB
+                        abs_file_path = Path(row[0]).resolve()
+                        if not abs_file_path.exists():
+                            logger.warning(f"Plex track not found at {abs_file_path}")
                             continue
+                        
+                        # Resolve music_dir to absolute path for comparison
+                        abs_music_dir = Path(self.music_dir).resolve()
+                        
+                        # Get relative path from music directory
+                        try:
+                            rel_path = abs_file_path.relative_to(abs_music_dir)
+                            rating = float(row[1])
+                            normalized_rating = max(1, min(5, round(rating / 2)))
                             
-                        rel_path = file_path.relative_to(self.music_dir)
-                        rating = float(row[1])
-                        normalized_rating = max(1, min(5, round(rating / 2)))
-                        eligible_tracks[str(rel_path)] = normalized_rating
+                            # Store as string for consistent handling
+                            eligible_tracks[str(rel_path)] = normalized_rating
+                            logger.debug(f"Added eligible track: {rel_path} (Rating: {normalized_rating})")
+                        except ValueError:
+                            # If file is not under music_dir, log warning
+                            logger.warning(f"File {abs_file_path} is not within music directory {abs_music_dir}")
                     except (ValueError, TypeError) as e:
-                        continue
+                        logger.error(f"Error processing row from Plex DB: {e}")
                         
                 return eligible_tracks
                 

@@ -223,17 +223,85 @@ class LibraryReorganizer:
         except Exception as e:
             return False, str(e)
 
+    def _get_file_metadata(self, file_path: Path) -> Dict[str, str]:
+        """Extract metadata directly from music file tags."""
+        try:
+            # Use mutagen to read file tags
+            import mutagen
+            from mutagen.easyid3 import EasyID3
+            from mutagen.mp3 import MP3
+            from mutagen.flac import FLAC
+            from mutagen.aiff import AIFF
+            
+            metadata = {}
+            
+            # Handle different file formats
+            if file_path.suffix.lower() == '.mp3':
+                try:
+                    audio = EasyID3(file_path)
+                    metadata = dict(audio)
+                except:
+                    audio = MP3(file_path)
+                    # Extract basic tags if available
+                    if 'TPE1' in audio:  # Artist
+                        metadata['artist'] = str(audio['TPE1'])
+                    if 'TIT2' in audio:  # Title
+                        metadata['title'] = str(audio['TIT2'])
+                    if 'TALB' in audio:  # Album
+                        metadata['album'] = str(audio['TALB'])
+            elif file_path.suffix.lower() == '.flac':
+                audio = FLAC(file_path)
+                metadata = dict(audio)
+            elif file_path.suffix.lower() == '.aiff':
+                audio = AIFF(file_path)
+                # Extract ID3 tags if available
+                if hasattr(audio, 'tags') and audio.tags:
+                    if 'TPE1' in audio.tags:  # Artist
+                        metadata['artist'] = str(audio.tags['TPE1'])
+                    if 'TIT2' in audio.tags:  # Title
+                        metadata['title'] = str(audio.tags['TIT2'])
+                    if 'TALB' in audio.tags:  # Album
+                        metadata['album'] = str(audio.tags['TALB'])
+            else:
+                # For other formats, try generic approach
+                audio = mutagen.File(file_path)
+                if audio and hasattr(audio, 'tags') and audio.tags:
+                    metadata = dict(audio.tags)
+            
+            # Clean up metadata values (handle list values)
+            for key, value in metadata.items():
+                if isinstance(value, list) and len(value) > 0:
+                    metadata[key] = value[0]
+            
+            # Return cleaned metadata
+            return {
+                'artist': metadata.get('artist', [file_path.parent.name])[0] if isinstance(metadata.get('artist', []), list) else metadata.get('artist', file_path.parent.name),
+                'title': metadata.get('title', [file_path.stem])[0] if isinstance(metadata.get('title', []), list) else metadata.get('title', file_path.stem),
+                'album': metadata.get('album', ['Unknown Album'])[0] if isinstance(metadata.get('album', []), list) else metadata.get('album', 'Unknown Album')
+            }
+        except Exception as e:
+            self.logger.error(f"Error reading metadata from {file_path}: {e}")
+            # Return default metadata based on filename
+            return {
+                'artist': file_path.parent.name,
+                'title': file_path.stem,
+                'album': 'Unknown Album'
+            }
+    
     def _process_track(
         self, 
         track: TrackFile
     ) -> Tuple[bool, Optional[str]]:
         """Process a single track for both libraries."""
         try:
-            # Generate sanitized artist/title based path
-            artist_dir = self._sanitize_filename(track.artist)
-            title = self._sanitize_filename(track.title)
+            # Extract metadata directly from file instead of using Plex metadata
+            file_metadata = self._get_file_metadata(track.source_path)
             
-            # Listening library processing
+            # Use file metadata for organization
+            artist_dir = self._sanitize_filename(file_metadata['artist'])
+            title = self._sanitize_filename(file_metadata['title'])
+            
+            # Listening library processing - use file metadata structure
             listening_artist_dir = self.config.listening_library_dir / artist_dir
             listening_artist_dir.mkdir(exist_ok=True)
             listening_dest = listening_artist_dir / track.source_path.name
@@ -244,26 +312,43 @@ class LibraryReorganizer:
             
             # Only process for DJ library if rating meets minimum
             if track.rating and track.rating >= self.config.min_dj_rating:
-                # DJ library processing
-                dj_artist_dir = self.config.dj_library_dir / artist_dir
-                dj_artist_dir.mkdir(exist_ok=True)
+                # DJ library approach: Preserve the EXACT same paths as in source directory
+                # This maintains Rekordbox compatibility since it uses paths as identifiers
                 
+                # Calculate the relative path from source directory
+                try:
+                    rel_path = track.source_path.relative_to(self.config.source_dir)
+                    dj_dest = self.config.dj_library_dir / rel_path
+                except ValueError:
+                    # Fallback if the file is not inside the source directory
+                    dj_dest = self.config.dj_library_dir / track.source_path.name
+                
+                # Ensure parent directories exist
+                dj_dest.parent.mkdir(parents=True, exist_ok=True)
+                
+                # For FLAC/WAV files, convert to AIFF but maintain original path structure
                 if track.needs_conversion:
-                    # Convert to AIFF for DJ library
-                    dj_dest = dj_artist_dir / f"{title}.aiff"
-                    success, error = self._convert_to_aiff(
-                        track.source_path, 
-                        dj_dest
-                    )
-                    if not success:
-                        return False, error
+                    # Convert to AIFF but keep the same path (just change extension)
+                    dj_dest = dj_dest.with_suffix('.aiff')
+                    
+                    # Only convert if the file doesn't already exist
+                    if not dj_dest.exists():
+                        success, error = self._convert_to_aiff(
+                            track.source_path, 
+                            dj_dest
+                        )
+                        if not success:
+                            return False, error
+                        self.logger.info(f"Added to DJ library: {track.source_path.name} (Rating: {track.rating/2:.1f} stars)")
+                    else:
+                        self.logger.debug(f"Skipped existing DJ library file: {track.source_path.name} (Rating: {track.rating/2:.1f} stars)")
                 else:
-                    # Copy non-FLAC/WAV files directly
-                    dj_dest = dj_artist_dir / track.source_path.name
+                    # Copy non-FLAC/WAV files directly to the same path structure
                     if not dj_dest.exists():
                         shutil.copy2(track.source_path, dj_dest)
-                
-                self.logger.info(f"Added to DJ library: {track.source_path.name} (Rating: {track.rating/2:.1f} stars)")
+                        self.logger.info(f"Added to DJ library: {track.source_path.name} (Rating: {track.rating/2:.1f} stars)")
+                    else:
+                        self.logger.debug(f"Skipped existing DJ library file: {track.source_path.name} (Rating: {track.rating/2:.1f} stars)")
             else:
                 self.logger.debug(
                     f"Skipped for DJ library: {track.source_path.name} "
@@ -432,9 +517,13 @@ class LibraryReorganizer:
                     dj_path = dj_path.with_suffix('.aiff')
 
                 if new_rating >= self.config.min_dj_rating / 2:  # Convert from 5-star to 10-point scale
-                    # Rating meets threshold - ensure file is in DJ library
+                    # Skip existence check at this level - rely on process_single_file's checks 
+                    # This avoids path mismatches due to metadata differences
+                    
+                    # Just process the file - the internal checks in process_single_file 
+                    # will determine if conversion/copying is needed
+                    self.logger.info(f"Processing track for DJ library: {relative_path}")
                     self.process_single_file(source_path)
-                    self.logger.info(f"Added/Updated in DJ library: {relative_path} (Rating: {new_rating} stars)")
                 else:
                     # Rating below threshold - remove from DJ library if present
                     if dj_path.exists():
