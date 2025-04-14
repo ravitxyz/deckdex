@@ -100,9 +100,10 @@ class FileProcessor:
     
 
     def process_files(self):
-        """Process all audio files, including loose tracks."""
+        """Process all audio files and artwork, including loose tracks."""
         processed_count = 0
         skipped_count = 0
+        artwork_processed = 0
 
         for file_path in self.source_dir.rglob('*'):
             if self._is_audio_file(file_path):
@@ -118,8 +119,13 @@ class FileProcessor:
                         processed_count += 1
                     else:
                         skipped_count += 1
+            elif self._is_artwork_file(file_path):
+                # Process artwork files in album folders
+                if file_path.parent != self.source_dir:  # Only process artwork in album folders
+                    if self._process_album_artwork(file_path):
+                        artwork_processed += 1
 
-        self.logger.info(f"Processing complete. Processed: {processed_count}, Skipped: {skipped_count}")
+        self.logger.info(f"Processing complete. Audio files processed: {processed_count}, Skipped: {skipped_count}, Artwork files processed: {artwork_processed}")
 
     def _process_loose_track(self, file_path: Path) -> bool:
         """Handle tracks that aren't in album folders. Returns True if processed, False if skipped."""
@@ -174,10 +180,29 @@ class FileProcessor:
                 self.logger.info(f"Copied album track: {file_path.name} -> {dest_file}")
             return True
         return False
+        
+    def _process_album_artwork(self, file_path: Path) -> bool:
+        """Handle cover art files in album folders. Returns True if processed, False if skipped."""
+        relative_path = file_path.relative_to(self.source_dir)
+        dest_file = self.dest_dir / relative_path
+
+        needs_proc, reason = self._needs_processing(file_path, dest_file)
+        
+        if needs_proc:
+            # Process the file
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            self._copy_with_metadata(file_path, dest_file)
+            self.logger.info(f"Copied album artwork: {file_path.name} -> {dest_file}")
+            return True
+        return False
 
     def _is_audio_file(self, file_path: Path) -> bool:
         """Check if file is a supported audio format."""
         return file_path.suffix.lower() in ['.mp3', '.flac', '.aiff', '.wav', '.m4a']
+        
+    def _is_artwork_file(self, file_path: Path) -> bool:
+        """Check if file is a cover art image."""
+        return file_path.suffix.lower() in ['.jpg', '.jpeg', '.png'] and file_path.stem.lower() in ['cover', 'folder', 'album', 'front', 'artwork', 'art']
 
     def _needs_conversion(self, file_path: Path) -> bool:
         """Check if file needs conversion to AIFF."""

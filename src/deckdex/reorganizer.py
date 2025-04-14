@@ -326,8 +326,16 @@ class LibraryReorganizer:
                 # Ensure parent directories exist
                 dj_dest.parent.mkdir(parents=True, exist_ok=True)
                 
+                # Handle artwork files separately - just copy them directly
+                if track.source_path.suffix.lower() in ['.jpg', '.jpeg', '.png'] and \
+                   track.source_path.stem.lower() in ['cover', 'folder', 'album', 'front', 'artwork', 'art']:
+                    if not dj_dest.exists():
+                        shutil.copy2(track.source_path, dj_dest)
+                        self.logger.info(f"Added artwork to DJ library: {track.source_path.name}")
+                    else:
+                        self.logger.debug(f"Skipped existing artwork in DJ library: {track.source_path.name}")
                 # For FLAC/WAV files, convert to AIFF but maintain original path structure
-                if track.needs_conversion:
+                elif track.needs_conversion:
                     # Convert to AIFF but keep the same path (just change extension)
                     dj_dest = dj_dest.with_suffix('.aiff')
                     
@@ -395,9 +403,14 @@ class LibraryReorganizer:
                 if not file_path.is_file() or file_path.name.startswith("."):
                     continue
                     
-                if file_path.suffix.lower() not in [
+                # Check if it's a supported audio file or artwork file
+                is_audio = file_path.suffix.lower() in [
                     '.mp3', '.flac', '.aiff', '.wav', '.m4a'
-                ]:
+                ]
+                is_artwork = file_path.suffix.lower() in ['.jpg', '.jpeg', '.png'] and \
+                             file_path.stem.lower() in ['cover', 'folder', 'album', 'front', 'artwork', 'art']
+                
+                if not (is_audio or is_artwork):
                     continue
                 
                 # Move cursor up one line and clear it before printing new filename
@@ -460,7 +473,27 @@ class LibraryReorganizer:
     def process_single_file(self, file_path: Path):
         """Process a single file for both libraries."""
         try:
-            # Get Plex metadata if available
+            # Check if this is an artwork file
+            is_artwork = file_path.suffix.lower() in ['.jpg', '.jpeg', '.png'] and \
+                         file_path.stem.lower() in ['cover', 'folder', 'album', 'front', 'artwork', 'art']
+            
+            if is_artwork:
+                # Create TrackFile object for artwork
+                track = TrackFile(
+                    source_path=file_path,
+                    title=file_path.stem,
+                    artist=file_path.parent.name,
+                    needs_conversion=False,
+                    file_hash=self._calculate_file_hash(file_path),
+                    # For artwork, always set a high enough rating to be included in DJ library
+                    rating=10.0
+                )
+                
+                # Process the artwork
+                self._process_track(track)
+                return
+            
+            # For audio files, get Plex metadata if available
             plex_metadata = self._get_plex_metadata(file_path)
             
             # Create TrackFile object
@@ -490,6 +523,10 @@ class LibraryReorganizer:
                 
             # Remove from DJ library
             dj_path = self.config.dj_library_dir / file_path.relative_to(self.config.source_dir)
+            # For audio files that might have been converted to AIFF
+            if file_path.suffix.lower() in ['.flac', '.wav']:
+                dj_path = dj_path.with_suffix('.aiff')
+                
             if dj_path.exists():
                 dj_path.unlink()
                 
