@@ -150,3 +150,159 @@ class MetadataService:
                     break
         
         return merged
+        
+    async def update_file_tags(self, audio_file: Path, metadata: TrackMetadata) -> bool:
+        """Write metadata to audio file tags.
+        
+        Args:
+            audio_file: Path to the audio file
+            metadata: Metadata to write to the file
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Import mutagen here to avoid global dependency
+            import mutagen
+            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TRCK, TCON, TDRC
+            from mutagen.flac import FLAC
+            from mutagen.mp3 import MP3
+            from mutagen.aiff import AIFF
+            from mutagen.mp4 import MP4
+            
+            file_ext = audio_file.suffix.lower()
+            
+            # Handle different file formats
+            if file_ext == '.mp3':
+                try:
+                    # Try to load existing tags first
+                    tags = ID3(audio_file)
+                except:
+                    # Create new tag structure if none exists
+                    tags = ID3()
+                    
+                # Update tag fields
+                if 'title' in metadata:
+                    tags["TIT2"] = TIT2(encoding=3, text=metadata['title'])
+                if 'artist' in metadata:
+                    tags["TPE1"] = TPE1(encoding=3, text=metadata['artist'])
+                if 'album' in metadata:
+                    tags["TALB"] = TALB(encoding=3, text=metadata['album'])
+                if 'track_number' in metadata:
+                    tags["TRCK"] = TRCK(encoding=3, text=str(metadata['track_number']))
+                if 'genre' in metadata:
+                    tags["TCON"] = TCON(encoding=3, text=metadata['genre'])
+                if 'year' in metadata:
+                    tags["TDRC"] = TDRC(encoding=3, text=str(metadata['year']))
+                    
+                # Save tags to file
+                tags.save(audio_file)
+                
+            elif file_ext == '.flac':
+                audio = FLAC(audio_file)
+                
+                # Update tag fields
+                if 'title' in metadata:
+                    audio["title"] = metadata['title']
+                if 'artist' in metadata:
+                    audio["artist"] = metadata['artist']
+                if 'album' in metadata:
+                    audio["album"] = metadata['album']
+                if 'track_number' in metadata and metadata['track_number']:
+                    audio["tracknumber"] = str(metadata['track_number'])
+                if 'genre' in metadata:
+                    audio["genre"] = metadata['genre']
+                if 'year' in metadata and metadata['year']:
+                    audio["date"] = str(metadata['year'])
+                    
+                # Save tags to file
+                audio.save()
+                
+            elif file_ext == '.m4a':
+                audio = MP4(audio_file)
+                
+                # Map our fields to MP4 tags
+                if 'title' in metadata:
+                    audio["\xa9nam"] = [metadata['title']]
+                if 'artist' in metadata:
+                    audio["\xa9ART"] = [metadata['artist']]
+                if 'album' in metadata:
+                    audio["\xa9alb"] = [metadata['album']]
+                if 'track_number' in metadata and metadata['track_number']:
+                    audio["trkn"] = [(metadata['track_number'], 0)]
+                if 'genre' in metadata:
+                    audio["\xa9gen"] = [metadata['genre']]
+                if 'year' in metadata and metadata['year']:
+                    audio["\xa9day"] = [str(metadata['year'])]
+                    
+                # Save tags to file
+                audio.save()
+                
+            elif file_ext == '.aiff':
+                audio = AIFF(audio_file)
+                
+                # Create ID3 tags if they don't exist
+                if audio.tags is None:
+                    from mutagen.id3 import ID3
+                    audio.tags = ID3()
+                    
+                # Update tag fields (using ID3 format for AIFF)
+                if 'title' in metadata:
+                    audio.tags["TIT2"] = TIT2(encoding=3, text=metadata['title'])
+                if 'artist' in metadata:
+                    audio.tags["TPE1"] = TPE1(encoding=3, text=metadata['artist'])
+                if 'album' in metadata:
+                    audio.tags["TALB"] = TALB(encoding=3, text=metadata['album'])
+                if 'track_number' in metadata:
+                    audio.tags["TRCK"] = TRCK(encoding=3, text=str(metadata['track_number']))
+                if 'genre' in metadata:
+                    audio.tags["TCON"] = TCON(encoding=3, text=metadata['genre'])
+                if 'year' in metadata:
+                    audio.tags["TDRC"] = TDRC(encoding=3, text=str(metadata['year']))
+                    
+                # Save tags to file
+                audio.save()
+                
+            else:
+                # For other formats, try generic approach
+                audio = mutagen.File(audio_file)
+                if audio:
+                    # Update metadata based on available fields
+                    for key, value in metadata.items():
+                        if value is not None:
+                            audio[key] = value
+                    audio.save()
+                else:
+                    logger.warning(f"Unsupported file format for tagging: {file_ext}")
+                    return False
+                
+            logger.info(f"Updated tags for {audio_file}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating tags for {audio_file}: {e}")
+            return False
+            
+    async def sync_libraries(self, source_file: Path, dj_file: Path) -> bool:
+        """Synchronize metadata between source library file and DJ library file.
+        
+        Args:
+            source_file: Path to file in source library
+            dj_file: Path to corresponding file in DJ library
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # First get enriched metadata
+            metadata = await self.get_metadata(source_file)
+            
+            # Update tags in both files
+            source_success = await self.update_file_tags(source_file, metadata)
+            dj_success = await self.update_file_tags(dj_file, metadata)
+            
+            return source_success and dj_success
+            
+        except Exception as e:
+            logger.error(f"Error syncing libraries: {e}")
+            return False
