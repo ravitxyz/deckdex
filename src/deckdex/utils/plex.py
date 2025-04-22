@@ -1,12 +1,38 @@
 import sqlite3
+import aiosqlite
 from pathlib import Path
 import logging
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import shutil
 from datetime import datetime
 import os
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PlexTrack:
+    """Represents a track in a Plex playlist."""
+    id: str
+    title: str
+    artist: str
+    album: Optional[str] = None
+    file_path: Optional[Path] = None
+    duration: Optional[int] = None
+    updated_at: Optional[datetime] = None
+
+
+@dataclass
+class PlexPlaylist:
+    """Represents a Plex playlist."""
+    id: str
+    title: str
+    tracks: List[PlexTrack]
+    summary: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    smart: bool = False
 
 class PlexLibraryReader:
     """Handle reading data from Plex's SQLite database."""
@@ -187,5 +213,205 @@ class PlexLibraryReader:
                 return eligible_tracks
                 
         except sqlite3.Error as e:
-            self.logger.error(f"Error reading Plex database: {e}")
+            logger.error(f"Error reading Plex database: {e}")
             raise
+            
+    async def get_playlists(self) -> List[PlexPlaylist]:
+        """Get all playlists from Plex database.
+        
+        Returns:
+            List of Plex playlists
+        """
+        playlists = []
+        
+        try:
+            async with aiosqlite.connect(f"file:{self.plex_db_path}?mode=ro", uri=True) as db:
+                # Configure connection for better concurrent access
+                await db.execute("PRAGMA journal_mode=WAL;")
+                await db.execute("PRAGMA synchronous=NORMAL;")
+                await db.execute("PRAGMA locking_mode=NORMAL;")
+                await db.execute("PRAGMA busy_timeout=10000;")
+                db.row_factory = sqlite3.Row
+                
+                # Query Plex playlists - metadata_type 15 is for playlists
+                query = """
+                    SELECT 
+                        mi.id, 
+                        mi.title, 
+                        mi.summary,
+                        mi.created_at,
+                        mi.updated_at,
+                        mi.extra_data
+                    FROM metadata_items mi
+                    WHERE mi.metadata_type = 15 
+                    AND mi.library_section_id IS NOT NULL
+                """
+                
+                async with db.execute(query) as cursor:
+                    async for row in cursor:
+                        playlist_id = row['id']
+                        title = row['title']
+                        summary = row['summary']
+                        created_at = datetime.fromisoformat(row['created_at']) if row['created_at'] else datetime.now()
+                        updated_at = datetime.fromisoformat(row['updated_at']) if row['updated_at'] else datetime.now()
+                        
+                        # Check if it's a smart playlist
+                        extra_data = row['extra_data']
+                        is_smart = extra_data and 'smart:' in extra_data
+                        
+                        # Get tracks in this playlist
+                        tracks = await self._get_playlist_tracks(db, playlist_id)
+                        
+                        if tracks:
+                            playlists.append(PlexPlaylist(
+                                id=str(playlist_id),
+                                title=title,
+                                summary=summary,
+                                tracks=tracks,
+                                created_at=created_at,
+                                updated_at=updated_at,
+                                smart=is_smart
+                            ))
+                
+                logger.info(f"Found {len(playlists)} playlists in Plex database")
+                return playlists
+                
+        except sqlite3.Error as e:
+            logger.error(f"Error reading Plex playlists: {e}")
+            return []
+    
+    async def _get_playlist_tracks(self, db, playlist_id: str) -> List[PlexTrack]:
+        """Get tracks in a playlist.
+        
+        Args:
+            db: Database connection
+            playlist_id: ID of the playlist
+            
+        Returns:
+            List of tracks in the playlist
+        """
+        tracks = []
+        
+        # Query for standard playlists using playlistitem table
+        query = """
+            SELECT 
+                pi.id as item_id,
+                pi.metadata_item_id,
+                pi.order_id,
+                mi.title,
+                ar.title as artist,
+                al.title as album,
+                mmi.duration,
+                mp.file as file_path,
+                mi.updated_at
+            FROM playlistitem pi
+            JOIN metadata_items mi ON pi.metadata_item_id = mi.id
+            LEFT JOIN metadata_items ar ON mi.parent_id = ar.id
+            LEFT JOIN metadata_items al ON mi.parent_id = al.parent_id
+            LEFT JOIN media_items mmi ON mi.id = mmi.metadata_item_id
+            LEFT JOIN media_parts mp ON mmi.id = mp.media_item_id
+            WHERE pi.playlist_id = ?
+            ORDER BY pi.order_id
+        """
+        
+        try:
+            async with db.execute(query, (playlist_id,)) as cursor:
+                async for row in cursor:
+                    track_id = row['metadata_item_id']
+                    title = row['title'] or 'Unknown Title'
+                    artist = row['artist'] or 'Unknown Artist'
+                    album = row['album']
+                    file_path = row['file_path']
+                    duration = row['duration']
+                    updated_at = datetime.fromisoformat(row['updated_at']) if row['updated_at'] else None
+                    
+                    tracks.append(PlexTrack(
+                        id=str(track_id),
+                        title=title,
+                        artist=artist,
+                        album=album,
+                        file_path=Path(file_path) if file_path else None,
+                        duration=duration,
+                        updated_at=updated_at
+                    ))
+        except Exception as e:
+            logger.error(f"Error getting tracks for playlist {playlist_id}: {e}")
+        
+        if not tracks:
+            # Try alternate query for playqueue_items if playlistitem returned nothing
+            # This is sometimes how Plex stores playlist tracks
+            alt_query = """
+                SELECT 
+                    pqi.id as item_id,
+                    pqi.metadata_item_id,
+                    pqi.order_id,
+                    mi.title,
+                    ar.title as artist,
+                    al.title as album,
+                    mmi.duration,
+                    mp.file as file_path,
+                    mi.updated_at
+                FROM playqueue_items pqi
+                JOIN metadata_items mi ON pqi.metadata_item_id = mi.id
+                LEFT JOIN metadata_items ar ON mi.parent_id = ar.id
+                LEFT JOIN metadata_items al ON mi.parent_id = al.parent_id
+                LEFT JOIN media_items mmi ON mi.id = mmi.metadata_item_id
+                LEFT JOIN media_parts mp ON mmi.id = mp.media_item_id
+                WHERE pqi.parent_id = ?
+                ORDER BY pqi.order_id
+            """
+            
+            try:
+                async with db.execute(alt_query, (playlist_id,)) as cursor:
+                    async for row in cursor:
+                        track_id = row['metadata_item_id']
+                        title = row['title'] or 'Unknown Title'
+                        artist = row['artist'] or 'Unknown Artist'
+                        album = row['album']
+                        file_path = row['file_path']
+                        duration = row['duration']
+                        updated_at = datetime.fromisoformat(row['updated_at']) if row['updated_at'] else None
+                        
+                        tracks.append(PlexTrack(
+                            id=str(track_id),
+                            title=title,
+                            artist=artist,
+                            album=album,
+                            file_path=Path(file_path) if file_path else None,
+                            duration=duration,
+                            updated_at=updated_at
+                        ))
+            except Exception as e:
+                logger.error(f"Error getting tracks using alternate query for playlist {playlist_id}: {e}")
+        
+        return tracks
+    
+    async def get_playlist_by_id(self, playlist_id: str) -> Optional[PlexPlaylist]:
+        """Get a specific playlist by ID.
+        
+        Args:
+            playlist_id: Playlist ID
+            
+        Returns:
+            Playlist if found, None otherwise
+        """
+        playlists = await self.get_playlists()
+        for playlist in playlists:
+            if playlist.id == playlist_id:
+                return playlist
+        return None
+    
+    async def get_playlist_by_title(self, title: str) -> Optional[PlexPlaylist]:
+        """Get a specific playlist by title.
+        
+        Args:
+            title: Playlist title
+            
+        Returns:
+            Playlist if found, None otherwise
+        """
+        playlists = await self.get_playlists()
+        for playlist in playlists:
+            if playlist.title == title:
+                return playlist
+        return None

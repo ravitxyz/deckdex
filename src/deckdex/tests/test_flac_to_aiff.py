@@ -8,6 +8,7 @@ import shutil
 import hashlib
 from mutagen import File as MutagenFile
 from datetime import datetime
+from typing import Optional, Tuple
 
 console = Console()
 
@@ -52,32 +53,97 @@ def verify_audio_file(file_path: Path) -> dict:
     except Exception as e:
         return {"valid": False, "error": str(e)}
 
+def find_cover_art(audio_file_path: Path) -> Optional[Path]:
+    """Find cover art in the directory of the audio file."""
+    directory = audio_file_path.parent
+    cover_names = ['cover', 'folder', 'album', 'front', 'artwork', 'art']
+    extensions = ['.jpg', '.jpeg', '.png']
+    
+    # Look for standard cover art filenames
+    for name in cover_names:
+        for ext in extensions:
+            cover_path = directory / f"{name}{ext}"
+            if cover_path.exists():
+                logging.debug(f"Found cover art: {cover_path}")
+                return cover_path
+    
+    # If no standard filename found, look for any image file
+    for ext in extensions:
+        for img_path in directory.glob(f"*{ext}"):
+            logging.debug(f"Found potential cover art: {img_path}")
+            return img_path
+            
+    return None
+
 def convert_flac_to_aiff(source_file: Path, dest_dir: Path) -> tuple[bool, str]:
-    """Convert FLAC to AIFF using ffmpeg."""
+    """Convert FLAC to AIFF using ffmpeg while preserving artwork."""
     try:
         dest_file = dest_dir / f"{source_file.stem}.aiff"
         
         # Ensure destination directory exists
         dest_dir.mkdir(parents=True, exist_ok=True)
         
-        # Perform conversion
-        cmd = [
+        # First, check if source file has embedded artwork
+        check_cmd = ['ffprobe', '-i', str(source_file), '-show_streams', 
+                     '-select_streams', 'v', '-v', 'error']
+        check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+        has_embedded_artwork = len(check_result.stdout.strip()) > 0
+        
+        if has_embedded_artwork:
+            logging.info(f"Using embedded artwork from {source_file}")
+            # Use embedded artwork from FLAC
+            cmd = [
+                'ffmpeg', '-i', str(source_file),
+                '-map', '0',  # Map all streams from input
+                '-c:a', 'pcm_s16be',  # Audio codec
+                '-c:v', 'copy',  # Copy artwork without re-encoding
+                '-disposition:v', 'attached_pic',  # Mark as cover art
+                '-f', 'aiff',
+                str(dest_file),
+                '-y'  # Overwrite if exists
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                return False, f"FFmpeg error: {result.stderr}"
+            return True, str(dest_file)
+        
+        # If no embedded artwork, look for cover art file in the directory
+        cover_art_path = find_cover_art(source_file)
+        
+        if cover_art_path:
+            logging.info(f"Using external cover art: {cover_art_path}")
+            # Convert audio and add external artwork
+            cmd = [
+                'ffmpeg',
+                '-i', str(source_file),  # Audio input
+                '-i', str(cover_art_path),  # Image input
+                '-map', '0:a',  # Map audio from first input
+                '-map', '1:v',  # Map video from second input
+                '-c:a', 'pcm_s16be',  # Audio codec
+                '-c:v', 'copy',  # Copy artwork without re-encoding
+                '-disposition:v', 'attached_pic',  # Mark as cover art
+                '-f', 'aiff',
+                str(dest_file),
+                '-y'  # Overwrite if exists
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                return False, f"FFmpeg error: {result.stderr}"
+            return True, str(dest_file)
+        
+        # If no artwork found, just convert the audio
+        logging.warning(f"No artwork found for {source_file}")
+        basic_cmd = [
             'ffmpeg', '-i', str(source_file),
-            '-c:a', 'pcm_s16be',  # Use 16-bit PCM encoding
+            '-c:a', 'pcm_s16be',
             '-f', 'aiff',
             str(dest_file),
-            '-y'  # Overwrite output files
+            '-y'
         ]
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True
-        )
-        
+        result = subprocess.run(basic_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             return False, f"FFmpeg error: {result.stderr}"
-            
+        
         return True, str(dest_file)
     except Exception as e:
         return False, str(e)

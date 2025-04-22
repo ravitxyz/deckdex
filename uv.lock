@@ -268,6 +268,7 @@ dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "aiosqlite" },
+    { name = "mutagen" },
     { name = "pyacoustid" },
     { name = "pyyaml" },
     { name = "rich" },
@@ -286,6 +287,7 @@ requires-dist = [
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "aiosqlite" },
+    { name = "mutagen" },
     { name = "pyacoustid" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'" },
@@ -539,6 +541,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1b/39/63d9bd977aed6a053955b30aad38bbfe1f0f8d7462f80760b498387c91ee/multidict-6.4.3-cp39-cp39-win32.whl", hash = "sha256:abcfed2c4c139f25c2355e180bcc077a7cae91eefbb8b3927bb3f836c9586f1f", size = 35087 },
     { url = "https://files.pythonhosted.org/packages/8f/d4/c6b8936fa9ff5e77fbba9ba431bc380ad0f8e6442a05c7fb6bfe35fdff60/multidict-6.4.3-cp39-cp39-win_amd64.whl", hash = "sha256:b1b389ae17296dd739015d5ddb222ee99fd66adeae910de21ac950e00979d897", size = 38680 },
     { url = "https://files.pythonhosted.org/packages/96/10/7d526c8974f017f1e7ca584c71ee62a638e9334d8d33f27d7cdfc9ae79e4/multidict-6.4.3-py3-none-any.whl", hash = "sha256:59fe01ee8e2a1e8ceb3f6dbb216b09c8d9f4ef1c22c4fc825d045a147fa2ebc9", size = 10400 },
+]
+
+[[package]]
+name = "mutagen"
+version = "1.47.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/e6/64bc71b74eef4b68e61eb921dcf72dabd9e4ec4af1e11891bbd312ccbb77/mutagen-1.47.0.tar.gz", hash = "sha256:719fadef0a978c31b4cf3c956261b3c58b6948b32023078a2117b1de09f0fc99", size = 1274186 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b0/7a/620f945b96be1f6ee357d211d5bf74ab1b7fe72a9f1525aafbfe3aee6875/mutagen-1.47.0-py3-none-any.whl", hash = "sha256:edd96f50c5907a9539d8e5bba7245f62c9f520aef333d13392a79a4f70aca719", size = 194391 },
 ]
 
 [[package]]

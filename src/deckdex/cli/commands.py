@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 import sys
 import time
-from typing import Dict
+from typing import Dict, Optional, Tuple
 from datetime import datetime
 
 from deckdex.reorganizer import LibraryReorganizer, Config
@@ -13,6 +13,11 @@ from deckdex.utils.plex import PlexLibraryReader
 from deckdex.metadata.service import MetadataService
 from deckdex.models import MusicLibrary, TrackMetadata
 from deckdex.file_processor import FileProcessor
+from deckdex.playlist.service import PlaylistService
+from deckdex.playlist.sync import PlaylistSyncService
+from deckdex.playlist.rekordbox import RekordboxXML
+from deckdex.identifier.service import TrackIdentifierService
+from deckdex.rekordbox import RekordboxExporter
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, Console
 
 logger = logging.getLogger(__name__)
@@ -198,6 +203,123 @@ def plex_ratings_command(args: argparse.Namespace):
         logger.error(f"Error importing Plex ratings: {e}")
         sys.exit(1)
 
+async def playlist_sync_async(args: argparse.Namespace):
+    """Synchronize playlists between Plex and Rekordbox."""
+    setup_logging(args.verbose)
+    
+    try:
+        # Load configuration
+        config = load_config(Path(args.config) if args.config else None)
+        
+        # Initialize services
+        db_path = config.db_path.parent / 'playlists.db'
+        
+        # Create console for output
+        console = Console()
+        
+        with console.status("[bold green]Initializing playlist services..."):
+            # Initialize track identifier service
+            track_identifier = TrackIdentifierService(str(config.db_path))
+            await track_identifier.initialize()
+            
+            # Initialize playlist service
+            playlist_service = PlaylistService(db_path, track_identifier)
+            await playlist_service.initialize()
+            
+            # Initialize Plex reader
+            plex_reader = PlexLibraryReader(config.plex_db_path, config.source_dir)
+            
+            # Initialize Rekordbox XML handler
+            rekordbox_xml = RekordboxXML(track_identifier)
+            
+            # Default Rekordbox XML path
+            default_xml_path = config.dj_library_dir / 'rekordbox.xml'
+            xml_path = Path(args.rekordbox_xml) if args.rekordbox_xml else default_xml_path
+            
+            # Initialize sync service
+            sync_service = PlaylistSyncService(
+                playlist_service=playlist_service,
+                track_identifier=track_identifier,
+                plex_reader=plex_reader,
+                rekordbox_xml=rekordbox_xml,
+                rekordbox_xml_path=xml_path
+            )
+        
+        # Determine sync direction
+        if args.dry_run:
+            logger.info("Running in dry-run mode (no changes will be made)")
+            
+            # Check Plex playlists
+            with console.status("[bold green]Checking Plex playlists..."):
+                plex_playlists = await plex_reader.get_playlists()
+                console.print(f"Found {len(plex_playlists)} playlists in Plex")
+                for playlist in plex_playlists:
+                    console.print(f"  - {playlist.title} ({len(playlist.tracks)} tracks)")
+            
+            # Check Rekordbox playlists if file exists
+            if xml_path.exists():
+                with console.status("[bold green]Checking Rekordbox playlists..."):
+                    rb_playlists = await rekordbox_xml.read_xml(xml_path)
+                    console.print(f"Found {len(rb_playlists)} playlists in Rekordbox XML")
+                    for playlist in rb_playlists:
+                        console.print(f"  - {playlist.name} ({len(playlist.items)} tracks)")
+                        
+            # Check database playlists
+            with console.status("[bold green]Checking database playlists..."):
+                plex_db_playlists = await playlist_service.get_playlists_by_source(
+                    PlaylistSource.PLEX
+                )
+                rb_db_playlists = await playlist_service.get_playlists_by_source(
+                    PlaylistSource.REKORDBOX
+                )
+                console.print(f"Found {len(plex_db_playlists)} Plex playlists in database")
+                console.print(f"Found {len(rb_db_playlists)} Rekordbox playlists in database")
+                
+            return
+        
+        # Perform synchronization based on direction
+        if args.direction == 'plex-to-rekordbox':
+            with console.status("[bold green]Importing playlists from Plex..."):
+                added, updated, failed = await sync_service.sync_from_plex()
+                console.print(f"Imported {added} new, updated {updated} existing, {failed} failed")
+            
+            with console.status("[bold green]Exporting playlists to Rekordbox..."):
+                success = await sync_service.sync_to_rekordbox()
+                if success:
+                    console.print(f"Successfully exported playlists to {xml_path}")
+                else:
+                    console.print("[bold red]Failed to export playlists to Rekordbox XML")
+                
+        elif args.direction == 'rekordbox-to-plex':
+            if not xml_path.exists():
+                console.print(f"[bold red]Rekordbox XML file not found: {xml_path}")
+                return
+                
+            with console.status("[bold green]Importing playlists from Rekordbox..."):
+                added, updated, failed = await sync_service.sync_from_rekordbox()
+                console.print(f"Imported {added} new, updated {updated} existing, {failed} failed")
+            
+            # Note: Currently we can't write back to Plex directly
+            console.print("[yellow]Note: Writing back to Plex is not yet supported")
+            
+        else:  # both directions
+            with console.status("[bold green]Syncing playlists in both directions..."):
+                added, updated, failed, rb_success = await sync_service.sync_all()
+                console.print(f"Synced {added} new, updated {updated} existing, {failed} failed")
+                
+                if rb_success:
+                    console.print(f"Successfully exported playlists to {xml_path}")
+                else:
+                    console.print("[bold red]Failed to export playlists to Rekordbox XML")
+        
+    except Exception as e:
+        logger.error(f"Error synchronizing playlists: {e}")
+        raise
+
+def playlist_sync_command(args: argparse.Namespace):
+    """Command wrapper for playlist synchronization."""
+    asyncio.run(playlist_sync_async(args))
+
 def import_library_command(args: argparse.Namespace):
     """Import music library from directory."""
     setup_logging(args.verbose)
@@ -335,6 +457,28 @@ def main():
     )
     ratings_parser.set_defaults(func=plex_ratings_command)
     
+    # Playlist sync command
+    playlist_parser = subparsers.add_parser(
+        'playlist-sync',
+        help="Synchronize playlists between Plex and Rekordbox"
+    )
+    playlist_parser.add_argument(
+        '--rekordbox-xml',
+        help="Path to Rekordbox XML file"
+    )
+    playlist_parser.add_argument(
+        '--direction',
+        choices=['plex-to-rekordbox', 'rekordbox-to-plex', 'both'],
+        default='both',
+        help="Direction of synchronization"
+    )
+    playlist_parser.add_argument(
+        '--dry-run', 
+        action='store_true',
+        help="Show what would be done without making changes"
+    )
+    playlist_parser.set_defaults(func=playlist_sync_command)
+    
     # Import library command
     import_parser = subparsers.add_parser(
         'import-library',
@@ -364,12 +508,89 @@ def main():
     )
     import_parser.set_defaults(func=import_library_command)
     
+    # Export Rekordbox XML command
+    export_rb_parser = subparsers.add_parser(
+        'export-rekordbox',
+        help="Export playlists to Rekordbox XML format"
+    )
+    export_rb_parser.add_argument(
+        '--output',
+        help="Path to save the XML file (defaults to rekordbox.xml in DJ library)"
+    )
+    export_rb_parser.add_argument(
+        '--playlist-id',
+        help="Export a specific playlist (exports all playlists if omitted)"
+    )
+    export_rb_parser.add_argument(
+        '--collection-name',
+        default="Deckdex Export",
+        help="Name for the collection folder in Rekordbox"
+    )
+    export_rb_parser.set_defaults(func=export_rekordbox_command)
+    
     args = parser.parse_args()
     
     if hasattr(args, 'func'):
         args.func(args)
     else:
         parser.print_help()
+
+async def export_rekordbox_async(args: argparse.Namespace):
+    """Export playlists to Rekordbox-compatible XML."""
+    setup_logging(args.verbose)
+    
+    try:
+        # Load configuration
+        config = load_config(Path(args.config) if args.config else None)
+        
+        # Initialize console for nice output
+        console = Console()
+        
+        # Determine paths
+        db_path = config.db_path.parent / 'playlists.db'
+        output_path = Path(args.output) if args.output else config.dj_library_dir / 'rekordbox.xml'
+        
+        with console.status("[bold green]Initializing exporter..."):
+            # Initialize track identifier service
+            track_identifier = TrackIdentifierService(str(config.db_path))
+            await track_identifier.initialize()
+            
+            # Initialize the exporter
+            exporter = RekordboxExporter(
+                db_path=db_path,
+                dj_library_path=config.dj_library_dir,
+                output_path=output_path,
+                track_identifier=track_identifier,
+                collection_name=args.collection_name
+            )
+        
+        # Export playlists
+        if args.playlist_id:
+            with console.status(f"[bold green]Exporting playlist {args.playlist_id}..."):
+                xml_path = await exporter.export_playlist(args.playlist_id)
+                console.print(f"✅ Successfully exported playlist to [bold]{xml_path}[/bold]")
+        else:
+            with console.status("[bold green]Exporting all playlists..."):
+                xml_path = await exporter.export_all_playlists()
+                console.print(f"✅ Successfully exported all playlists to [bold]{xml_path}[/bold]")
+        
+        # Print instructions for Rekordbox 7.x
+        console.print("\n[bold yellow]Import Instructions for Rekordbox 7.x:[/bold yellow]")
+        console.print("1. Open Rekordbox 7.x")
+        console.print("2. Click [bold]View[/bold] in the top menu, then select [bold]Show Browser[/bold]")
+        console.print("3. In the browser sidebar, right-click on [bold]Playlists[/bold]")
+        console.print("4. Select [bold]Import Playlist[/bold]")
+        console.print("5. Choose [bold]rekordbox xml[/bold] from the dropdown")
+        console.print(f"6. Navigate to and select: [bold]{xml_path}[/bold]")
+        console.print("7. The playlists should appear in a folder named [bold]Deckdex Export[/bold]")
+        
+    except Exception as e:
+        logger.error(f"Error exporting to Rekordbox XML: {e}")
+        raise
+
+def export_rekordbox_command(args: argparse.Namespace):
+    """Command wrapper for Rekordbox XML export."""
+    asyncio.run(export_rekordbox_async(args))
 
 if __name__ == "__main__":
     main()
