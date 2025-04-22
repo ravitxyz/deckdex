@@ -208,19 +208,90 @@ class FileProcessor:
         """Check if file needs conversion to AIFF."""
         return file_path.suffix.lower() in ['.flac', '.wav']
 
+    def _find_cover_art(self, audio_file_path: Path) -> Optional[Path]:
+        """Find cover art in the directory of the audio file."""
+        directory = audio_file_path.parent
+        cover_names = ['cover', 'folder', 'album', 'front', 'artwork', 'art']
+        extensions = ['.jpg', '.jpeg', '.png']
+        
+        # Look for standard cover art filenames
+        for name in cover_names:
+            for ext in extensions:
+                cover_path = directory / f"{name}{ext}"
+                if cover_path.exists():
+                    self.logger.debug(f"Found cover art: {cover_path}")
+                    return cover_path
+        
+        # If no standard filename found, look for any image file
+        for ext in extensions:
+            for img_path in directory.glob(f"*{ext}"):
+                self.logger.debug(f"Found potential cover art: {img_path}")
+                return img_path
+                
+        return None
+
     def _convert_to_aiff(self, source_file: Path, dest_file: Path):
-        """Convert audio file to AIFF format."""
+        """Convert audio file to AIFF format while preserving artwork."""
+        # First, try using embedded artwork from the FLAC file
         cmd = [
             'ffmpeg', '-i', str(source_file),
-            '-c:a', 'pcm_s16be',
+            '-map', '0',  # Map all streams from input
+            '-c:a', 'pcm_s16be',  # Audio codec
+            '-c:v', 'copy',  # Copy artwork without re-encoding if present
+            '-disposition:v', 'attached_pic',  # Mark artwork as cover art
             '-f', 'aiff',
             str(dest_file),
-            '-y'
+            '-y'  # Overwrite if exists
         ]
+        
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            # First, check if source file has embedded artwork
+            check_cmd = ['ffprobe', '-i', str(source_file), '-show_streams', 
+                         '-select_streams', 'v', '-v', 'error']
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+            has_embedded_artwork = len(check_result.stdout.strip()) > 0
+            
+            if has_embedded_artwork:
+                self.logger.info(f"Using embedded artwork from {source_file}")
+                # Run the conversion with embedded artwork
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                return
+            
+            # If no embedded artwork, look for cover art file in the directory
+            cover_art_path = self._find_cover_art(source_file)
+            
+            if cover_art_path:
+                self.logger.info(f"Using external cover art: {cover_art_path}")
+                # Convert audio and add external artwork
+                cmd = [
+                    'ffmpeg',
+                    '-i', str(source_file),  # Audio input
+                    '-i', str(cover_art_path),  # Image input
+                    '-map', '0:a',  # Map audio from first input
+                    '-map', '1:v',  # Map video from second input
+                    '-c:a', 'pcm_s16be',  # Audio codec
+                    '-c:v', 'copy',  # Copy artwork without re-encoding
+                    '-disposition:v', 'attached_pic',  # Mark as cover art
+                    '-f', 'aiff',
+                    str(dest_file),
+                    '-y'  # Overwrite if exists
+                ]
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                return
+            
+            # If no artwork found, just convert the audio
+            self.logger.warning(f"No artwork found for {source_file}")
+            basic_cmd = [
+                'ffmpeg', '-i', str(source_file),
+                '-c:a', 'pcm_s16be',
+                '-f', 'aiff',
+                str(dest_file),
+                '-y'
+            ]
+            subprocess.run(basic_cmd, check=True, capture_output=True, text=True)
+            
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Conversion failed for {source_file}: {e}")
+            self.logger.error(f"Conversion failed for {source_file}: {e.stderr if hasattr(e, 'stderr') else e}")
             raise
 
     def _copy_with_metadata(self, src: Path, dst: Path):
