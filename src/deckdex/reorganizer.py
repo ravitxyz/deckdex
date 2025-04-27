@@ -151,6 +151,38 @@ class LibraryReorganizer:
         for char in invalid_chars:
             filename = filename.replace(char, '_')
         return filename.strip()
+        
+    def _normalize_filename(self, filename: str) -> str:
+        """Remove track numbers and standardize filenames for DJ library.
+        
+        This ensures Rekordbox sees consistent paths and doesn't re-analyze tracks.
+        Handles patterns like:
+        - "01 - Track Name.aiff"
+        - "01. Track Name.aiff"
+        - "01 Track Name.aiff"
+        - "Track 01 - Name.aiff"
+        """
+        import re
+        
+        # Get file extension and stem
+        name_parts = filename.rsplit('.', 1)
+        name = name_parts[0]
+        extension = name_parts[1] if len(name_parts) > 1 else ""
+        
+        # Remove leading track numbers (01, 01., 01 -, etc.)
+        name = re.sub(r'^(\d+)[\s.\-_]+', '', name)
+        
+        # Remove track numbers with brackets ([01], (01), etc.)
+        name = re.sub(r'^\[(\d+)\][\s.\-_]*', '', name)
+        name = re.sub(r'^\((\d+)\)[\s.\-_]*', '', name)
+        
+        # Cleanup any leftover spaces, dashes, dots at start
+        name = name.strip('.-_ ')
+        
+        # Add extension back if it exists
+        if extension:
+            return f"{name}.{extension}"
+        return name
 
     def _get_plex_metadata(self, file_path: Path) -> Optional[PlexMetadata]:
         """Get metadata from Plex database."""
@@ -374,16 +406,21 @@ class LibraryReorganizer:
             
             # Only process for DJ library if rating meets minimum
             if track.rating and track.rating >= self.config.min_dj_rating:
-                # DJ library approach: Preserve the EXACT same paths as in source directory
-                # This maintains Rekordbox compatibility since it uses paths as identifiers
+                # DJ library approach: Use normalized paths without track numbers
+                # This ensures Rekordbox sees consistent paths and doesn't re-analyze tracks
                 
-                # Calculate the relative path from source directory
+                # Calculate destination path using normalized filename
                 try:
+                    # Get relative directory structure
                     rel_path = track.source_path.relative_to(self.config.source_dir)
-                    dj_dest = self.config.dj_library_dir / rel_path
+                    
+                    # Use normalized filename but keep same directory structure
+                    normalized_filename = self._normalize_filename(rel_path.name)
+                    dj_dest = self.config.dj_library_dir / rel_path.parent / normalized_filename
                 except ValueError:
                     # Fallback if the file is not inside the source directory
-                    dj_dest = self.config.dj_library_dir / track.source_path.name
+                    normalized_filename = self._normalize_filename(track.source_path.name)
+                    dj_dest = self.config.dj_library_dir / normalized_filename
                 
                 # Ensure parent directories exist
                 dj_dest.parent.mkdir(parents=True, exist_ok=True)
